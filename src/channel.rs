@@ -1,62 +1,98 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, Condvar};
+use std::sync::atomic::{AtomicBool, Ordering};
+
 
 pub enum ChannelError {
-        ChannelEmpty,
         ChannelClosed,
+        ChannelEmpty,
+        RecvBlocked
 }
 
 /// Sender part of the channel
 pub struct Sender<T> {
-        sender: Arc<SharedState<T>>
+        state: Arc<SharedState<T>>
 }
 
 impl<T> Sender<T> {
+        /// Send an item on the channel
         pub fn send(&self, item: T) -> Result<(), ChannelError> {
-                let (mut elements, condvar) = (self.sender.elements.lock().unwrap(), &self.sender.is_empty);
+                let mut elements = self.state.elements.lock().unwrap();
+
+                if self.state.closed.load(Ordering::Relaxed) {
+                        return Err(ChannelError::ChannelClosed);
+                }
+
                 elements.push_back(item);
-                condvar.notify_one();
+                self.state.is_empty.notify_one();
+                Ok(())
+        }
+
+        /// Close the channel
+        pub fn close(&mut self) -> Result<(), ChannelError> {
+                self.state.closed.store(true, Ordering::Relaxed);
                 Ok(())
         }
 }
 
 /// Receiver part of the channel
 pub struct Receiver<T> {
-        receiver: Arc<SharedState<T>>
+        state: Arc<SharedState<T>>
 }
 
 impl<T> Receiver<T> {
         pub fn recv(&self) -> Result<T, ChannelError> {
-                // make sure this is not closed
-                if self.receiver.closed {
-                        return Err(ChannelError::ChannelClosed);
-                }
-
-                // get the lock and condvar
-                let (mut elements, condvar) = (self.receiver.elements.lock().unwrap(), &self.receiver.is_empty);
-
-                // if there are no elements in the channel, just wait
-                while elements.len() == 0 {
+                let (mut elements, condvar) = (self.state.elements.lock().unwrap(), &self.state.is_empty);
+                while elements.is_empty() {
+                        if self.state.closed.load(Ordering::Relaxed) {
+                                return Err(ChannelError::ChannelClosed);
+                        }
                         elements = condvar.wait(elements).unwrap();
                 }
                 // we have an element, return it
                 Ok(elements.pop_front().unwrap())
         }
+
+        pub fn try_recv(&self) -> Result<T, ChannelError> {
+                if self.state.closed.load(Ordering::Acquire) {
+                    if let Ok(mut guard) = self.state.elements.try_lock() {
+                        return if let Some(item) = guard.pop_front() {
+                            Ok(item)
+                        } else {
+                            Err(ChannelError::ChannelClosed)
+                        };
+                    }
+                }
+                
+                if let Ok(mut guard) = self.state.elements.try_lock() {
+                    if let Some(item) = guard.pop_front() {
+                        Ok(item)
+                    } else {
+                        Err(ChannelError::ChannelEmpty)
+                    }
+                } else {
+                    Err(ChannelError::RecvBlocked)
+                }
+            }
 }
 
 /// The shared state between the sender and the receiver
 pub struct SharedState<T> {
         elements: Mutex<VecDeque<T>>,
         is_empty: Condvar,
-        closed: bool
+        closed: AtomicBool
 }
 
 
 pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
-        let shared_state = Mutex::new(VecDeque::new());
-        let shared_state = Arc::new(SharedState { elements: shared_state , is_empty: Condvar::new(), closed: false});
-        let sender = Sender { sender: shared_state.clone() };
-        let receiver = Receiver { receiver: shared_state };
+        let shared_state = Arc::new(SharedState {
+                elements: Mutex::new(VecDeque::new()),
+                is_empty: Condvar::new(),
+                closed: AtomicBool::new(false)
+        });
+
+        let sender = Sender { state: shared_state.clone() };
+        let receiver = Receiver { state: shared_state };
         (sender, receiver)
 }
     
