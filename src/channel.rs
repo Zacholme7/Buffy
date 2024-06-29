@@ -1,8 +1,10 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, Condvar};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 
 
+#[derive(Debug)]
 pub enum ChannelError {
         ChannelClosed,
         ChannelEmpty,
@@ -104,6 +106,61 @@ mod tests {
         fn test_channel_creation() {
             let (tx, rx) = channel::<i32>();
             // Basic test to ensure channel creation doesn't panic
+        }
+
+        #[test]
+        fn test_send_and_recv() {
+                let (tx, rx) = channel::<usize>();
+                tx.send(10).unwrap();
+                assert_eq!(rx.recv().unwrap(), 10);
+        }
+
+        #[test]
+        fn test_multiple_send_and_recv() {
+                let (tx, rx) = channel::<usize>();
+                tx.send(10).unwrap();
+                tx.send(11).unwrap();
+                tx.send(12).unwrap();
+                tx.send(13).unwrap();
+                assert_eq!(rx.recv().unwrap(), 10);
+                assert_eq!(rx.recv().unwrap(), 11);
+                assert_eq!(rx.recv().unwrap(), 12);
+                assert_eq!(rx.recv().unwrap(), 13);
+        }
+
+        #[test]
+        fn test_send_and_try_recv() {
+            let (tx, rx) = channel();
+            tx.send(42).unwrap();
+            assert_eq!(rx.try_recv().unwrap(), 42);
+            assert!(matches!(rx.try_recv(), Err(ChannelError::ChannelEmpty)));
+        }
+    
+        #[test]
+        fn test_send_after_close() {
+            let (mut tx, rx) = channel::<i32>();
+            tx.close().unwrap();
+            assert!(matches!(tx.send(42), Err(ChannelError::ChannelClosed)));
+            assert!(matches!(rx.recv(), Err(ChannelError::ChannelClosed)));
+        }
+    
+        #[test]
+        fn test_send_and_recv_multiple_threads() {
+            let (tx, rx) = channel();
+            let tx_thread = thread::spawn(move || {
+                for i in 0..100 {
+                    tx.send(i).unwrap();
+                }
+            });
+            let rx_thread = thread::spawn(move || {
+                let mut sum = 0;
+                for _ in 0..100 {
+                    sum += rx.recv().unwrap();
+                }
+                sum
+            });
+            tx_thread.join().unwrap();
+            assert_eq!(rx_thread.join().unwrap(), 4950); // sum of 0..99
         }
 
 }
